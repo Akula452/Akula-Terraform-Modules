@@ -3,6 +3,14 @@ name: Terraform Modules Workflow
 on:
   workflow_dispatch:
     inputs:
+      module:
+        description: 'Select Module'
+        required: true
+        type: choice
+        options:
+          - s3
+          - lambda
+          - vault-integration
       environment:
         description: 'Select Environment'
         required: true
@@ -30,186 +38,18 @@ on:
 
 jobs:
   terraform:
-    name: Terraform ${{ github.event.inputs.action }} - ${{ github.event.inputs.environment }}
+    name: Terraform ${{ github.event.inputs.action }} - ${{ github.event.inputs.module }} - ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
     
     defaults:
       run:
-        working-directory: ./terraform/modules/aws/s3
+        working-directory: ./terraform/modules/aws/${{ github.event.inputs.module }}
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-        
-        on:
-          workflow_dispatch:
-            inputs:
-              module:
-                description: 'Select Module'
-                required: true
-                type: choice
-                options:
-                  - s3
-                  - lambda
-              environment:
-                description: 'Select Environment'
-                required: true
-                type: choice
-                options:
-                  - dev
-                  - test
-                  - prod
-              action:
-                description: 'Select Action'
-                required: true
-                type: choice
-                options:
-                  - plan
-                  - apply
-                  - destroy
-              branch:
-                description: 'Select Branch'
-                required: true
-                type: choice
-                options:
-                  - dev
-                  - test
-                  - main
-        
-        jobs:
-          terraform:
-            name: Terraform ${{ github.event.inputs.action }} - ${{ github.event.inputs.module }} - ${{ github.event.inputs.environment }}
-            runs-on: ubuntu-latest
-            environment: ${{ github.event.inputs.environment }}
-            
-            defaults:
-              run:
-                working-directory: ./terraform/modules/aws/${{ github.event.inputs.module }}
-            
-            steps:
-              - name: Checkout code
-                uses: actions/checkout@v4
-                with:
-                  ref: ${{ github.event.inputs.branch }}
-        
-              - name: Setup Terraform
-                uses: hashicorp/setup-terraform@v3
-                with:
-                  terraform_version: 1.6.0
-        
-              - name: Configure AWS Credentials
-                uses: aws-actions/configure-aws-credentials@v4
-                with:
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-        
-              - name: Terraform Format Check
-                run: terraform fmt -check -recursive
-                continue-on-error: true
-        
-              - name: Terraform Init
-                run: |
-                  terraform init \
-                    -backend-config="bucket=my-terraform-state-${{ github.event.inputs.environment }}" \
-                    -backend-config="key=${{ github.event.inputs.module }}/terraform.tfstate" \
-                    -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}" \
-                    -backend-config="dynamodb_table=terraform-state-lock-${{ github.event.inputs.environment }}"
-        
-              - name: Terraform Validate
-                run: terraform validate
-        
-              - name: Set tfvars path
-                id: set-path
-                run: |
-                  if [ "${{ github.event.inputs.module }}" == "s3" ]; then
-                    echo "common_tfvars=${GITHUB_WORKSPACE}/envconfig/common.tfvars" >> $GITHUB_OUTPUT
-                    echo "env_tfvars=${GITHUB_WORKSPACE}/envconfig/${{ github.event.inputs.environment }}.tfvars" >> $GITHUB_OUTPUT
-                  else
-                    echo "common_tfvars=${GITHUB_WORKSPACE}/envconfig/${{ github.event.inputs.module }}/common.tfvars" >> $GITHUB_OUTPUT
-                    echo "env_tfvars=${GITHUB_WORKSPACE}/envconfig/${{ github.event.inputs.module }}/${{ github.event.inputs.environment }}.tfvars" >> $GITHUB_OUTPUT
-                  fi
-        
-              - name: Terraform Plan
-                if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
-                run: |
-                  terraform plan \
-                    -var-file="${{ steps.set-path.outputs.common_tfvars }}" \
-                    -var-file="${{ steps.set-path.outputs.env_tfvars }}" \
-                    -out=tfplan \
-                    -no-color | tee plan-output.txt
-                
-              - name: Comment PR with Plan
-                if: github.event.inputs.action == 'plan' && github.event_name == 'pull_request'
-                uses: actions/github-script@v7
-                with:
-                  script: |
-                    const fs = require('fs');
-                    const plan = fs.readFileSync('terraform/modules/aws/${{ github.event.inputs.module }}/plan-output.txt', 'utf8');
-                    const output = `#### Terraform Plan - ${{ github.event.inputs.module }} - ${{ github.event.inputs.environment }} 📖
-                    \`\`\`
-                    ${plan}
-                    \`\`\`
-                    *Triggered by: @${{ github.actor }}*`;
-                    
-                    github.rest.issues.createComment({
-                      issue_number: context.issue.number,
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      body: output
-                    });
-        
-              - name: Terraform Apply
-                if: github.event.inputs.action == 'apply'
-                run: terraform apply -auto-approve tfplan
-        
-              - name: Terraform Destroy Plan
-                if: github.event.inputs.action == 'destroy'
-                run: |
-                  terraform plan -destroy \
-                    -var-file="${{ steps.set-path.outputs.common_tfvars }}" \
-                    -var-file="${{ steps.set-path.outputs.env_tfvars }}" \
-                    -out=destroy-plan
-        
-              - name: Terraform Destroy
-                if: github.event.inputs.action == 'destroy'
-                run: terraform apply -auto-approve destroy-plan
-        
-              - name: Upload Plan Artifact
-                if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'destroy'
-                uses: actions/upload-artifact@v4
-                with:
-                  name: terraform-plan-${{ github.event.inputs.module }}-${{ github.event.inputs.environment }}-${{ github.run_number }}
-                  path: |
-                    ./terraform/modules/aws/${{ github.event.inputs.module }}/tfplan
-                    ./terraform/modules/aws/${{ github.event.inputs.module }}/destroy-plan
-                    ./terraform/modules/aws/${{ github.event.inputs.module }}/plan-output.txt
-                  retention-days: 30
-        
-              - name: Terraform Output
-                if: github.event.inputs.action == 'apply'
-                run: terraform output -json > terraform-outputs.json
-        
-              - name: Upload Terraform Outputs
-                if: github.event.inputs.action == 'apply'
-                uses: actions/upload-artifact@v4
-                with:
-                  name: terraform-outputs-${{ github.event.inputs.module }}-${{ github.event.inputs.environment }}-${{ github.run_number }}
-                  path: ./terraform/modules/aws/${{ github.event.inputs.module }}/terraform-outputs.json
-                  retention-days: 90
-        
-              - name: Notify Success
-                if: success()
-                run: |
-                  echo "✅ Terraform ${{ github.event.inputs.action }} completed successfully for ${{ github.event.inputs.module }} module in ${{ github.event.inputs.environment }} environment"
-        
-              - name: Notify Failure
-                if: failure()
-                run: |
-                  echo "❌ Terraform ${{ github.event.inputs.action }} failed for ${{ github.event.inputs.module }} module in ${{ github.event.inputs.environment }} environment"
-                  exit 1
           ref: ${{ github.event.inputs.branch }}
 
       - name: Setup Terraform
@@ -224,6 +64,10 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
+      - name: Setup Vault Token
+        if: github.event.inputs.module == 'vault-integration'
+        run: echo "VAULT_TOKEN=${{ secrets.VAULT_TOKEN }}" >> $GITHUB_ENV
+
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
         continue-on-error: true
@@ -232,18 +76,34 @@ jobs:
         run: |
           terraform init \
             -backend-config="bucket=my-terraform-state-${{ github.event.inputs.environment }}" \
-            -backend-config="key=s3/terraform.tfstate" \
+            -backend-config="key=${{ github.event.inputs.module }}/terraform.tfstate" \
             -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}" \
             -backend-config="dynamodb_table=terraform-state-lock-${{ github.event.inputs.environment }}"
 
       - name: Terraform Validate
         run: terraform validate
 
+      - name: Set tfvars path
+        id: set-path
+        run: |
+          if [ "${{ github.event.inputs.module }}" == "s3" ]; then
+            echo "common_tfvars=${GITHUB_WORKSPACE}/envconfig/common.tfvars" >> $GITHUB_OUTPUT
+            echo "env_tfvars=${GITHUB_WORKSPACE}/envconfig/${{ github.event.inputs.environment }}.tfvars" >> $GITHUB_OUTPUT
+          else
+            echo "common_tfvars=${GITHUB_WORKSPACE}/envconfig/${{ github.event.inputs.module }}/common.tfvars" >> $GITHUB_OUTPUT
+            echo "env_tfvars=${GITHUB_WORKSPACE}/envconfig/${{ github.event.inputs.module }}/${{ github.event.inputs.environment }}.tfvars" >> $GITHUB_OUTPUT
+          fi
+
       - name: Terraform Plan
         if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
         run: |
           terraform plan \
-            -var-file="${GITHUB_WORKSPACE}/envconfig/${{ github.event.inputs.environment }}.tfvars" \
+            -var-file="${{ steps.set-path.outputs.common_tfvars }}" \
+            -var-file="${{ steps.set-path.outputs.env_tfvars }}" \
+            -var="vault_token=${{ secrets.VAULT_TOKEN }}" \
             -out=tfplan \
             -no-color | tee plan-output.txt
         
@@ -253,8 +113,8 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const plan = fs.readFileSync('terraform/modules/aws/s3/plan-output.txt', 'utf8');
-            const output = `#### Terraform Plan - ${{ github.event.inputs.environment }} 📖
+            const plan = fs.readFileSync('terraform/modules/aws/${{ github.event.inputs.module }}/plan-output.txt', 'utf8');
+            const output = `#### Terraform Plan - ${{ github.event.inputs.module }} - ${{ github.event.inputs.environment }} 📖
             \`\`\`
             ${plan}
             \`\`\`
@@ -269,28 +129,39 @@ jobs:
 
       - name: Terraform Apply
         if: github.event.inputs.action == 'apply'
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
         run: terraform apply -auto-approve tfplan
 
       - name: Terraform Destroy Plan
         if: github.event.inputs.action == 'destroy'
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
         run: |
           terraform plan -destroy \
-            -var-file="${GITHUB_WORKSPACE}/envconfig/${{ github.event.inputs.environment }}.tfvars" \
+            -var-file="${{ steps.set-path.outputs.common_tfvars }}" \
+            -var-file="${{ steps.set-path.outputs.env_tfvars }}" \
+            -var="vault_token=${{ secrets.VAULT_TOKEN }}" \
             -out=destroy-plan
 
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy'
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
         run: terraform apply -auto-approve destroy-plan
 
       - name: Upload Plan Artifact
         if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'destroy'
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-plan-${{ github.event.inputs.environment }}-${{ github.run_number }}
+          name: terraform-plan-${{ github.event.inputs.module }}-${{ github.event.inputs.environment }}-${{ github.run_number }}
           path: |
-            ./terraform/modules/aws/s3/tfplan
-            ./terraform/modules/aws/s3/destroy-plan
-            ./terraform/modules/aws/s3/plan-output.txt
+            ./terraform/modules/aws/${{ github.event.inputs.module }}/tfplan
+            ./terraform/modules/aws/${{ github.event.inputs.module }}/destroy-plan
+            ./terraform/modules/aws/${{ github.event.inputs.module }}/plan-output.txt
           retention-days: 30
 
       - name: Terraform Output
@@ -301,17 +172,17 @@ jobs:
         if: github.event.inputs.action == 'apply'
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-outputs-${{ github.event.inputs.environment }}-${{ github.run_number }}
-          path: ./terraform/modules/aws/s3/terraform-outputs.json
+          name: terraform-outputs-${{ github.event.inputs.module }}-${{ github.event.inputs.environment }}-${{ github.run_number }}
+          path: ./terraform/modules/aws/${{ github.event.inputs.module }}/terraform-outputs.json
           retention-days: 90
 
       - name: Notify Success
         if: success()
         run: |
-          echo "✅ Terraform ${{ github.event.inputs.action }} completed successfully for ${{ github.event.inputs.environment }} environment"
+          echo "✅ Terraform ${{ github.event.inputs.action }} completed successfully for ${{ github.event.inputs.module }} module in ${{ github.event.inputs.environment }} environment"
 
       - name: Notify Failure
         if: failure()
         run: |
-          echo "❌ Terraform ${{ github.event.inputs.action }} failed for ${{ github.event.inputs.environment }} environment"
+          echo "❌ Terraform ${{ github.event.inputs.action }} failed for ${{ github.event.inputs.module }} module in ${{ github.event.inputs.environment }} environment"
           exit 1
