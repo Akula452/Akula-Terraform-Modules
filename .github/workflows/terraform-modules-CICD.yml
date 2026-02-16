@@ -36,6 +36,11 @@ on:
           - test
           - main
 
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
 jobs:
   terraform:
     name: Terraform ${{ github.event.inputs.action }} - ${{ github.event.inputs.module }} - ${{ github.event.inputs.environment }}
