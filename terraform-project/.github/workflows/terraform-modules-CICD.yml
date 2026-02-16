@@ -41,7 +41,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:        name: Terraform Modules Workflow
+        with:
         
         on:
           workflow_dispatch:
